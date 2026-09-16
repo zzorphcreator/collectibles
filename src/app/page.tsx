@@ -1,31 +1,21 @@
 import Link from "next/link";
-import fs from "fs";
 import { CardGrid } from "@/components/CardGrid";
-import { getDb, getDbPath, setupSchema } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import { getCuratedListings, countCards } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
-function ensureDb() {
-  const path = getDbPath();
-  if (!fs.existsSync(path)) {
-    setupSchema();
-  } else {
-    getDb();
-  }
-}
-
-export default function HomePage() {
-  ensureDb();
+export default async function HomePage() {
+  await ensureDb();
   let cardCount = 0;
   try {
-    cardCount = countCards();
+    cardCount = await countCards();
   } catch {
     cardCount = 0;
   }
 
-  const trending = cardCount ? getCuratedListings("trending", 8) : [];
-  const gaining = cardCount ? getCuratedListings("gaining", 8) : [];
+  const trending = cardCount ? await getCuratedListings("trending", 8) : [];
+  const gaining = cardCount ? await getCuratedListings("gaining", 8) : [];
 
   return (
     <div className="space-y-12">
@@ -41,7 +31,7 @@ export default function HomePage() {
           <p className="text-sm leading-relaxed text-zinc-400 sm:text-base">
             Browse curated demo listings with 7d/30d moves, sparklines, and
             whitelist-source comps. No auth, no bidding — just a polished
-            collectibles discovery UI backed by SQLite.
+            collectibles discovery UI backed by SQLite / Turso.
           </p>
           <div className="flex flex-wrap gap-3 pt-2">
             <Link

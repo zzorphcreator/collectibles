@@ -1,9 +1,9 @@
-import Database from "better-sqlite3";
+import { createClient, type Client } from "@libsql/client";
 import fs from "fs";
 import path from "path";
 
 const DATA_DIR = path.join(process.cwd(), "data");
-const DB_PATH = path.join(DATA_DIR, "collectibles.db");
+const DEFAULT_FILE_PATH = path.join(DATA_DIR, "collectibles.db");
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS cards (
@@ -51,25 +51,73 @@ CREATE INDEX IF NOT EXISTS idx_cards_set ON cards(set_code);
 CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity);
 `;
 
-let _db: Database.Database | null = null;
+let _client: Client | null = null;
 
-export function getDbPath() {
-  return DB_PATH;
+/** Resolved libsql URL (file:… locally, or Turso remote). */
+export function getDatabaseUrl(): string {
+  const fromEnv = process.env.TURSO_DATABASE_URL?.trim();
+  if (fromEnv) return fromEnv;
+  // Absolute file path works reliably with @libsql/client
+  return `file:${DEFAULT_FILE_PATH}`;
 }
 
-export function getDb(): Database.Database {
-  if (_db) return _db;
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+/** Local filesystem path when using a file: URL; otherwise null (remote Turso). */
+export function getDbPath(): string | null {
+  const url = getDatabaseUrl();
+  if (url.startsWith("file:")) {
+    const raw = url.slice("file:".length);
+    // Support file:/abs/path and file:./relative
+    return path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
   }
-  _db = new Database(DB_PATH);
-  _db.pragma("journal_mode = WAL");
-  _db.pragma("foreign_keys = ON");
-  return _db;
+  return null;
 }
 
-export function setupSchema(db: Database.Database = getDb()) {
-  db.exec(SCHEMA_SQL);
+export function isRemoteDatabase(): boolean {
+  return getDbPath() === null;
+}
+
+export function getClient(): Client {
+  if (_client) return _client;
+
+  const url = getDatabaseUrl();
+  const filePath = getDbPath();
+
+  if (filePath) {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+
+  const authToken = process.env.TURSO_AUTH_TOKEN?.trim();
+  if (isRemoteDatabase() && !authToken) {
+    throw new Error(
+      "TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL points to a remote Turso database"
+    );
+  }
+
+  _client = createClient({
+    url,
+    ...(authToken ? { authToken } : {}),
+  });
+  return _client;
+}
+
+/** Ensure schema exists (idempotent). Safe for local file and remote Turso. */
+export async function setupSchema(client: Client = getClient()): Promise<void> {
+  // Enable FK checks where supported (local libsql / SQLite)
+  try {
+    await client.execute("PRAGMA foreign_keys = ON");
+  } catch {
+    // Remote may ignore or reject; schema still works
+  }
+  await client.executeMultiple(SCHEMA_SQL);
+}
+
+export async function ensureDb(): Promise<Client> {
+  const client = getClient();
+  await setupSchema(client);
+  return client;
 }
 
 export type ConditionCode = "raw_nm" | "psa_10" | "cgc_10";

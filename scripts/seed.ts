@@ -3,8 +3,13 @@
  * All prices are invented sample values — not live market data.
  */
 import fs from "fs";
-import path from "path";
-import { getDb, getDbPath, setupSchema } from "../src/lib/db";
+import {
+  getClient,
+  getDatabaseUrl,
+  getDbPath,
+  isRemoteDatabase,
+  setupSchema,
+} from "../src/lib/db";
 import { slugify } from "../src/lib/format";
 
 type SeedCard = {
@@ -453,35 +458,43 @@ function buildSnapshots(
   return out;
 }
 
-function main() {
-  const dbPath = getDbPath();
-  const dataDir = path.dirname(dbPath);
-  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+async function resetDatabase() {
+  const client = getClient();
+  // Works for both local file and remote Turso
+  await client.executeMultiple(`
+    DROP TABLE IF EXISTS curated_entries;
+    DROP TABLE IF EXISTS price_snapshots;
+    DROP TABLE IF EXISTS card_conditions;
+    DROP TABLE IF EXISTS cards;
+  `);
+  await setupSchema(client);
 
-  // Reset DB for clean demo seed
-  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
-    if (fs.existsSync(f)) fs.unlinkSync(f);
+  // Local-only: also remove leftover WAL companions if present
+  const dbPath = getDbPath();
+  if (dbPath) {
+    for (const f of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+      if (fs.existsSync(f)) {
+        try {
+          fs.unlinkSync(f);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+}
+
+async function main() {
+  const url = getDatabaseUrl();
+  console.log("Seeding database:", url);
+  if (isRemoteDatabase()) {
+    console.log("Mode: remote Turso (TURSO_DATABASE_URL set)");
+  } else {
+    console.log("Mode: local file SQLite via @libsql/client");
   }
 
-  const db = getDb();
-  setupSchema(db);
-
-  const insertCard = db.prepare(`
-    INSERT INTO cards (name, set_name, set_code, number, variant, language, rarity, image_url)
-    VALUES (@name, @set_name, @set_code, @number, @variant, 'EN', @rarity, @image_url)
-  `);
-  const insertCond = db.prepare(`
-    INSERT INTO card_conditions (card_id, condition, slug)
-    VALUES (@card_id, @condition, @slug)
-  `);
-  const insertSnap = db.prepare(`
-    INSERT INTO price_snapshots (condition_id, price_usd, source, source_url, pulled_at)
-    VALUES (@condition_id, @price_usd, @source, @source_url, @pulled_at)
-  `);
-  const insertCurated = db.prepare(`
-    INSERT INTO curated_entries (condition_id, tag, blurb, rank, featured_at)
-    VALUES (@condition_id, @tag, @blurb, @rank, @featured_at)
-  `);
+  await resetDatabase();
+  const client = getClient();
 
   const sources = [
     "tcgplayer",
@@ -490,109 +503,125 @@ function main() {
     "cgc",
   ] as const;
 
-  const seedAll = db.transaction(() => {
-    let conditionCount = 0;
-    let snapCount = 0;
-    let curatedCount = 0;
-    const now = new Date();
+  let conditionCount = 0;
+  let snapCount = 0;
+  let curatedCount = 0;
+  const now = new Date();
 
-    CARDS.forEach((card, cardIdx) => {
-      const info = insertCard.run({
-        name: card.name,
-        set_name: card.set_name,
-        set_code: card.set_code,
-        number: card.number,
-        variant: card.variant,
-        rarity: card.rarity,
-        image_url: card.image_url,
-      });
-      const cardId = Number(info.lastInsertRowid);
-
-      for (const cond of card.conditions) {
-        const slug = slugify([
-          card.set_code,
-          card.number,
-          card.name,
-          cond.condition,
-        ]);
-        const cInfo = insertCond.run({
-          card_id: cardId,
-          condition: cond.condition,
-          slug,
-        });
-        const conditionId = Number(cInfo.lastInsertRowid);
-        conditionCount++;
-
-        const days = 10 + (cardIdx % 5); // 10–14 days
-        const rng = mulberry32(cardId * 1000 + conditionId * 17 + 42);
-        const series = buildSnapshots(
-          cond.base,
-          cond.volatility,
-          cond.trend,
-          days,
-          rng
-        );
-
-        for (const point of series) {
-          const pulled = new Date(now);
-          pulled.setUTCDate(pulled.getUTCDate() - point.dayOffset);
-          pulled.setUTCHours(14 + Math.floor(rng() * 4), Math.floor(rng() * 60), 0, 0);
-
-          // Primary marketable source by condition type
-          let primary: (typeof sources)[number] =
-            cond.condition === "raw_nm"
-              ? "tcgplayer"
-              : cond.condition === "psa_10"
-                ? "psa"
-                : "cgc";
-          // Mix in pricecharting every other day for comps variety
-          const source =
-            point.dayOffset % 2 === 0 ? primary : ("pricecharting" as const);
-
-          const sourceUrl =
-            source === "tcgplayer"
-              ? `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(card.name)} (demo)`
-              : source === "pricecharting"
-                ? `https://www.pricecharting.com/search-products?q=${encodeURIComponent(card.name)}&type=prices (demo)`
-                : source === "psa"
-                  ? `https://www.psacard.com/ (demo)`
-                  : `https://www.cgccards.com/ (demo)`;
-
-          insertSnap.run({
-            condition_id: conditionId,
-            price_usd: point.price,
-            source,
-            source_url: sourceUrl,
-            pulled_at: pulled.toISOString(),
-          });
-          snapCount++;
-        }
-
-        if (cond.tag && cond.blurb) {
-          insertCurated.run({
-            condition_id: conditionId,
-            tag: cond.tag,
-            blurb: cond.blurb,
-            rank: cond.rank ?? 50,
-            featured_at: now.toISOString(),
-          });
-          curatedCount++;
-        }
-      }
+  // Sequential writes so we can read lastInsertRowid after each card/condition
+  for (const [cardIdx, card] of CARDS.entries()) {
+    const cardResult = await client.execute({
+      sql: `
+        INSERT INTO cards (name, set_name, set_code, number, variant, language, rarity, image_url)
+        VALUES (?, ?, ?, ?, ?, 'EN', ?, ?)
+      `,
+      args: [
+        card.name,
+        card.set_name,
+        card.set_code,
+        card.number,
+        card.variant,
+        card.rarity,
+        card.image_url,
+      ],
     });
+    const cardId = Number(cardResult.lastInsertRowid);
 
-    return {
-      cards: CARDS.length,
-      conditions: conditionCount,
-      snapshots: snapCount,
-      curated: curatedCount,
-    };
-  });
+    for (const cond of card.conditions) {
+      const slug = slugify([
+        card.set_code,
+        card.number,
+        card.name,
+        cond.condition,
+      ]);
+      const condResult = await client.execute({
+        sql: `
+          INSERT INTO card_conditions (card_id, condition, slug)
+          VALUES (?, ?, ?)
+        `,
+        args: [cardId, cond.condition, slug],
+      });
+      const conditionId = Number(condResult.lastInsertRowid);
+      conditionCount++;
 
-  const stats = seedAll();
-  console.log("Demo DB seeded at:", dbPath);
+      const days = 10 + (cardIdx % 5); // 10–14 days
+      const rng = mulberry32(cardId * 1000 + conditionId * 17 + 42);
+      const series = buildSnapshots(
+        cond.base,
+        cond.volatility,
+        cond.trend,
+        days,
+        rng
+      );
+
+      const snapBatch: Array<{ sql: string; args: (string | number)[] }> = [];
+      for (const point of series) {
+        const pulled = new Date(now);
+        pulled.setUTCDate(pulled.getUTCDate() - point.dayOffset);
+        pulled.setUTCHours(14 + Math.floor(rng() * 4), Math.floor(rng() * 60), 0, 0);
+
+        let primary: (typeof sources)[number] =
+          cond.condition === "raw_nm"
+            ? "tcgplayer"
+            : cond.condition === "psa_10"
+              ? "psa"
+              : "cgc";
+        const source =
+          point.dayOffset % 2 === 0 ? primary : ("pricecharting" as const);
+
+        const sourceUrl =
+          source === "tcgplayer"
+            ? `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(card.name)} (demo)`
+            : source === "pricecharting"
+              ? `https://www.pricecharting.com/search-products?q=${encodeURIComponent(card.name)}&type=prices (demo)`
+              : source === "psa"
+                ? `https://www.psacard.com/ (demo)`
+                : `https://www.cgccards.com/ (demo)`;
+
+        snapBatch.push({
+          sql: `
+            INSERT INTO price_snapshots (condition_id, price_usd, source, source_url, pulled_at)
+            VALUES (?, ?, ?, ?, ?)
+          `,
+          args: [conditionId, point.price, source, sourceUrl, pulled.toISOString()],
+        });
+        snapCount++;
+      }
+      if (snapBatch.length) {
+        await client.batch(snapBatch, "write");
+      }
+
+      if (cond.tag && cond.blurb) {
+        await client.execute({
+          sql: `
+            INSERT INTO curated_entries (condition_id, tag, blurb, rank, featured_at)
+            VALUES (?, ?, ?, ?, ?)
+          `,
+          args: [
+            conditionId,
+            cond.tag,
+            cond.blurb,
+            cond.rank ?? 50,
+            now.toISOString(),
+          ],
+        });
+        curatedCount++;
+      }
+    }
+  }
+
+  const stats = {
+    cards: CARDS.length,
+    conditions: conditionCount,
+    snapshots: snapCount,
+    curated: curatedCount,
+  };
+  console.log("Demo DB seeded.");
   console.log(JSON.stringify(stats, null, 2));
   console.log("NOTE: All prices are DEMO / sample data — not live market quotes.");
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

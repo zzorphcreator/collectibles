@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { CardArt } from "@/components/CardArt";
 import { PriceChip } from "@/components/PriceChip";
 import { Sparkline } from "@/components/Sparkline";
-import { getDb, getDbPath, setupSchema } from "@/lib/db";
+import { ensureDb } from "@/lib/db";
 import {
   conditionLabel,
   formatPulledAt,
@@ -11,14 +11,8 @@ import {
   sourceLabel,
 } from "@/lib/format";
 import { getComps, getListingBySlug } from "@/lib/queries";
-import fs from "fs";
 
 export const dynamic = "force-dynamic";
-
-function ensureDb() {
-  if (!fs.existsSync(getDbPath())) setupSchema();
-  else getDb();
-}
 
 type Params = Promise<{ slug: string }>;
 
@@ -27,12 +21,12 @@ export default async function CardDetailPage({
 }: {
   params: Params;
 }) {
-  ensureDb();
+  await ensureDb();
   const { slug } = await params;
-  const card = getListingBySlug(slug);
+  const card = await getListingBySlug(slug);
   if (!card) notFound();
 
-  const comps = getComps(card.condition_id);
+  const comps = await getComps(card.condition_id);
 
   return (
     <div className="space-y-8">

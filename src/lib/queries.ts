@@ -1,4 +1,4 @@
-import { getDb, type ConditionCode, type CuratedTag } from "./db";
+import { getClient, type ConditionCode, type CuratedTag } from "./db";
 
 export type ListingCard = {
   condition_id: number;
@@ -34,20 +34,33 @@ function daysAgoIso(days: number): string {
   return d.toISOString();
 }
 
-function attachPrices(rows: Array<Record<string, unknown>>): ListingCard[] {
-  const db = getDb();
-  const snapStmt = db.prepare(`
-    SELECT price_usd, pulled_at
-    FROM price_snapshots
-    WHERE condition_id = ?
-    ORDER BY pulled_at ASC
-  `);
+function rowToRecord(row: Record<string, unknown>): Record<string, unknown> {
+  return row;
+}
 
-  return rows.map((r) => {
-    const snaps = snapStmt.all(r.condition_id as number) as Array<{
-      price_usd: number;
-      pulled_at: string;
-    }>;
+async function attachPrices(
+  rows: Array<Record<string, unknown>>
+): Promise<ListingCard[]> {
+  const client = getClient();
+  const out: ListingCard[] = [];
+
+  for (const r of rows) {
+    const conditionId = Number(r.condition_id);
+    const snapResult = await client.execute({
+      sql: `
+        SELECT price_usd, pulled_at
+        FROM price_snapshots
+        WHERE condition_id = ?
+        ORDER BY pulled_at ASC
+      `,
+      args: [conditionId],
+    });
+
+    const snaps = snapResult.rows.map((s) => ({
+      price_usd: Number(s.price_usd),
+      pulled_at: String(s.pulled_at),
+    }));
+
     const latest = snaps.length ? snaps[snaps.length - 1].price_usd : 0;
     const cutoff7 = daysAgoIso(7);
     const cutoff30 = daysAgoIso(30);
@@ -64,35 +77,39 @@ function attachPrices(rows: Array<Record<string, unknown>>): ListingCard[] {
 
     const sparkline = snaps.slice(-14).map((s) => s.price_usd);
 
-    return {
-      condition_id: r.condition_id as number,
-      slug: r.slug as string,
+    out.push({
+      condition_id: conditionId,
+      slug: String(r.slug),
       condition: r.condition as ConditionCode,
-      name: r.name as string,
-      set_name: r.set_name as string,
-      set_code: r.set_code as string,
-      number: r.number as string,
-      variant: r.variant as string,
-      rarity: r.rarity as string,
-      image_url: (r.image_url as string | null) ?? null,
+      name: String(r.name),
+      set_name: String(r.set_name),
+      set_code: String(r.set_code),
+      number: String(r.number),
+      variant: String(r.variant),
+      rarity: String(r.rarity),
+      image_url: r.image_url != null ? String(r.image_url) : null,
       tag: (r.tag as CuratedTag | null) ?? null,
-      blurb: (r.blurb as string | null) ?? null,
-      rank: (r.rank as number | null) ?? null,
+      blurb: r.blurb != null ? String(r.blurb) : null,
+      rank: r.rank != null ? Number(r.rank) : null,
       latest_price: latest,
       price_7d_ago: price7,
       price_30d_ago: price30,
       change_7d_pct: pctChange(latest, price7),
       change_30d_pct: pctChange(latest, price30),
       sparkline,
-    };
-  });
+    });
+  }
+
+  return out;
 }
 
-export function getCuratedListings(tag: CuratedTag, limit = 12): ListingCard[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `
+export async function getCuratedListings(
+  tag: CuratedTag,
+  limit = 12
+): Promise<ListingCard[]> {
+  const client = getClient();
+  const result = await client.execute({
+    sql: `
     SELECT
       cc.id AS condition_id,
       cc.slug,
@@ -113,10 +130,11 @@ export function getCuratedListings(tag: CuratedTag, limit = 12): ListingCard[] {
     WHERE ce.tag = ?
     ORDER BY ce.rank ASC, ce.featured_at DESC
     LIMIT ?
-  `
-    )
-    .all(tag, limit);
-  return attachPrices(rows as Array<Record<string, unknown>>);
+  `,
+    args: [tag, limit],
+  });
+  const rows = result.rows.map((r) => rowToRecord(r as Record<string, unknown>));
+  return attachPrices(rows);
 }
 
 export type BrowseFilters = {
@@ -126,10 +144,12 @@ export type BrowseFilters = {
   graded?: "all" | "raw" | "graded";
 };
 
-export function browseListings(filters: BrowseFilters = {}): ListingCard[] {
-  const db = getDb();
+export async function browseListings(
+  filters: BrowseFilters = {}
+): Promise<ListingCard[]> {
+  const client = getClient();
   const clauses: string[] = [];
-  const params: unknown[] = [];
+  const params: (string | number)[] = [];
 
   if (filters.q?.trim()) {
     clauses.push("(c.name LIKE ? OR c.set_name LIKE ?)");
@@ -152,9 +172,8 @@ export function browseListings(filters: BrowseFilters = {}): ListingCard[] {
 
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-  const rows = db
-    .prepare(
-      `
+  const result = await client.execute({
+    sql: `
     SELECT
       cc.id AS condition_id,
       cc.slug,
@@ -185,18 +204,20 @@ export function browseListings(filters: BrowseFilters = {}): ListingCard[] {
     JOIN cards c ON c.id = cc.card_id
     ${where}
     ORDER BY c.name ASC, cc.condition ASC
-  `
-    )
-    .all(...params);
+  `,
+    args: params,
+  });
 
-  return attachPrices(rows as Array<Record<string, unknown>>);
+  const rows = result.rows.map((r) => rowToRecord(r as Record<string, unknown>));
+  return attachPrices(rows);
 }
 
-export function getListingBySlug(slug: string): ListingCard | null {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `
+export async function getListingBySlug(
+  slug: string
+): Promise<ListingCard | null> {
+  const client = getClient();
+  const result = await client.execute({
+    sql: `
     SELECT
       cc.id AS condition_id,
       cc.slug,
@@ -226,56 +247,59 @@ export function getListingBySlug(slug: string): ListingCard | null {
     FROM card_conditions cc
     JOIN cards c ON c.id = cc.card_id
     WHERE cc.slug = ?
-  `
-    )
-    .get(slug);
+  `,
+    args: [slug],
+  });
 
-  if (!row) return null;
-  return attachPrices([row as Record<string, unknown>])[0];
+  if (!result.rows.length) return null;
+  const listings = await attachPrices([
+    rowToRecord(result.rows[0] as Record<string, unknown>),
+  ]);
+  return listings[0];
 }
 
-export function getComps(conditionId: number) {
-  const db = getDb();
-  return db
-    .prepare(
-      `
+export async function getComps(conditionId: number) {
+  const client = getClient();
+  const result = await client.execute({
+    sql: `
     SELECT id, condition_id, price_usd, source, source_url, pulled_at
     FROM price_snapshots
     WHERE condition_id = ?
     ORDER BY pulled_at DESC, id DESC
     LIMIT 24
-  `
-    )
-    .all(conditionId) as Array<{
-    id: number;
-    condition_id: number;
-    price_usd: number;
-    source: string;
-    source_url: string | null;
-    pulled_at: string;
-  }>;
+  `,
+    args: [conditionId],
+  });
+
+  return result.rows.map((r) => ({
+    id: Number(r.id),
+    condition_id: Number(r.condition_id),
+    price_usd: Number(r.price_usd),
+    source: String(r.source),
+    source_url: r.source_url != null ? String(r.source_url) : null,
+    pulled_at: String(r.pulled_at),
+  }));
 }
 
-export function getFilterOptions() {
-  const db = getDb();
-  const sets = db
-    .prepare(
-      `SELECT DISTINCT set_code, set_name FROM cards ORDER BY set_name ASC`
-    )
-    .all() as Array<{ set_code: string; set_name: string }>;
-  const rarities = db
-    .prepare(`SELECT DISTINCT rarity FROM cards ORDER BY rarity ASC`)
-    .all() as Array<{ rarity: string }>;
+export async function getFilterOptions() {
+  const client = getClient();
+  const setsResult = await client.execute(
+    `SELECT DISTINCT set_code, set_name FROM cards ORDER BY set_name ASC`
+  );
+  const raritiesResult = await client.execute(
+    `SELECT DISTINCT rarity FROM cards ORDER BY rarity ASC`
+  );
   return {
-    sets,
-    rarities: rarities.map((r) => r.rarity),
+    sets: setsResult.rows.map((r) => ({
+      set_code: String(r.set_code),
+      set_name: String(r.set_name),
+    })),
+    rarities: raritiesResult.rows.map((r) => String(r.rarity)),
   };
 }
 
-export function countCards(): number {
-  const db = getDb();
-  const row = db.prepare(`SELECT COUNT(*) AS n FROM cards`).get() as {
-    n: number;
-  };
-  return row.n;
+export async function countCards(): Promise<number> {
+  const client = getClient();
+  const result = await client.execute(`SELECT COUNT(*) AS n FROM cards`);
+  return Number(result.rows[0]?.n ?? 0);
 }

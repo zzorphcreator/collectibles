@@ -1,15 +1,9 @@
 import { CardGrid } from "@/components/CardGrid";
 import { browseListings, getFilterOptions } from "@/lib/queries";
-import { getDb, getDbPath, setupSchema } from "@/lib/db";
-import fs from "fs";
+import { ensureDb } from "@/lib/db";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
-
-function ensureDb() {
-  if (!fs.existsSync(getDbPath())) setupSchema();
-  else getDb();
-}
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
@@ -18,7 +12,7 @@ export default async function BrowsePage({
 }: {
   searchParams: SearchParams;
 }) {
-  ensureDb();
+  await ensureDb();
   const sp = await searchParams;
   const q = typeof sp.q === "string" ? sp.q : "";
   const set = typeof sp.set === "string" ? sp.set : "";
@@ -26,8 +20,8 @@ export default async function BrowsePage({
   const graded =
     sp.graded === "raw" || sp.graded === "graded" ? sp.graded : "all";
 
-  const options = getFilterOptions();
-  const cards = browseListings({
+  const options = await getFilterOptions();
+  const cards = await browseListings({
     q,
     set: set || undefined,
     rarity: rarity || undefined,
