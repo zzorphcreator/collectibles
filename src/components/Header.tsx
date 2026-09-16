@@ -19,7 +19,7 @@ export function Header() {
               Collectibles
             </div>
             <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-500">
-              Pokémon TCG · Demo
+              Pokémon TCG · Discovery
             </div>
           </div>
         </Link>

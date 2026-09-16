@@ -29,9 +29,10 @@ export default async function HomePage() {
             Trending &amp; gaining-value Pokémon cards
           </h1>
           <p className="text-sm leading-relaxed text-zinc-400 sm:text-base">
-            Browse curated demo listings with 7d/30d moves, sparklines, and
-            whitelist-source comps. No auth, no bidding — just a polished
-            collectibles discovery UI backed by SQLite / Turso.
+            Browse curated listings with 7d/30d moves, sparklines, and
+            whitelist-source comps. Card identity and the latest price come from
+            the Pokémon TCG API (TCGPlayer market). No auth, no bidding — just a
+            polished collectibles discovery UI backed by SQLite / Turso.
           </p>
           <div className="flex flex-wrap gap-3 pt-2">
             <Link
@@ -50,11 +51,16 @@ export default async function HomePage() {
           {cardCount === 0 ? (
             <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
               Database empty. From the project root run{" "}
-              <code className="rounded bg-black/30 px-1.5 py-0.5">npm run db:seed</code>.
+              <code className="rounded bg-black/30 px-1.5 py-0.5">npm run db:ingest</code>{" "}
+              (preferred) or{" "}
+              <code className="rounded bg-black/30 px-1.5 py-0.5">npm run db:seed</code>{" "}
+              for offline demo data.
             </p>
           ) : (
             <p className="text-xs text-zinc-500">
-              Seeded catalog: {cardCount} cards (demo prices).
+              Catalog: {cardCount} cards · latest prices from Pokémon TCG API /
+              TCGPlayer when ingested via{" "}
+              <code className="rounded bg-black/30 px-1">db:ingest</code>.
             </p>
           )}
         </div>
@@ -62,12 +68,12 @@ export default async function HomePage() {
 
       <CardGrid
         title="Trending now"
-        subtitle="Curated demo picks with recent discovery interest"
+        subtitle="Top live market prices from the latest Pokémon TCG API ingest"
         cards={trending}
       />
       <CardGrid
         title="Gaining value"
-        subtitle="Strongest upward 7d moves in this sample set"
+        subtitle="Largest 7d moves in the current catalog (history may be illustrative)"
         cards={gaining}
       />
     </div>

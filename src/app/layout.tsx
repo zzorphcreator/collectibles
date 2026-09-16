@@ -15,9 +15,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Collectibles · Pokémon TCG Discovery (Demo)",
+  title: "Collectibles · Pokémon TCG Discovery",
   description:
-    "Read-only local demo for browsing trending and gaining-value Pokémon TCG cards. Sample data only.",
+    "Browse trending and gaining-value Pokémon TCG cards. Latest prices from TCGPlayer via Pokémon TCG API; historical sparkline points may be illustrative.",
 };
 
 export default function RootLayout({
@@ -34,7 +34,7 @@ export default function RootLayout({
         <Header />
         <main className="mx-auto min-h-[70vh] max-w-6xl px-4 py-8">{children}</main>
         <footer className="border-t border-white/10 py-8 text-center text-xs text-zinc-500">
-          Local demo · read-only · prices are sample data · schema ready for bot snapshots
+          Read-only discovery · latest = live TCGPlayer market (Pokémon TCG API) · history may be illustrative
         </footer>
       </body>
     </html>

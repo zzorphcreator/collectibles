@@ -1,6 +1,9 @@
 /**
  * Seed DEMO price data for the collectibles discovery demo.
  * All prices are invented sample values — not live market data.
+ *
+ * Prefer `npm run db:ingest` (scripts/ingest-pokemontcg.ts) for real card
+ * identity + live TCGPlayer market prices from the Pokémon TCG API.
  */
 import fs from "fs";
 import {
